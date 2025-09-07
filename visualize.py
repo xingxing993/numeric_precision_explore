@@ -150,44 +150,62 @@ def get_format_values_optimized(format_obj, max_values: int = 10000) -> Tuple[np
         return np.array([]), []
 
 def get_format_values_analytical(format_obj, max_values: int = 10000) -> Tuple[np.ndarray, List[str]]:
-    """Get representative values using analytical methods for wide formats."""
+    """Get representative values using analytical methods for wide formats.
+    
+    For wide formats, this returns minimal placeholder data since the plotting functions
+    will use analytical counting via get_analytical_histogram_data instead.
+    """
     try:
-        # Create a representative sample using the format's range
+        # For wide formats, return minimal placeholder data
+        # The plotting functions will use analytical counting instead
+        return np.array([0.0]), ['zero']
+    except Exception as e:
+        st.error(f"Error in analytical value generation: {str(e)}")
+        return np.array([]), []
+
+
+def get_analytical_histogram_data(format_obj, bins: int = 100) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Get histogram data using analytical counting for wide formats."""
+    try:
         min_val = format_obj.min_value
         max_val = format_obj.max_value
         
-        # Generate evenly spaced points across the range
-        num_points = min(max_values, 10000)  # Cap at 10k points for memory
+        # Create bins that are symmetric around zero
+        max_abs_val = max(abs(min_val), abs(max_val))
         
-        if hasattr(format_obj, 'signed') and format_obj.signed:
-            # For signed formats, ensure we include zero and both positive/negative ranges
-            if min_val < 0 and max_val > 0:
-                neg_points = np.linspace(min_val, -1e-10, num_points // 3)
-                pos_points = np.linspace(1e-10, max_val, num_points // 3)
-                zero_points = np.array([0.0])
-                values = np.concatenate([neg_points, zero_points, pos_points])
-            else:
-                values = np.linspace(min_val, max_val, num_points)
+        if min_val < 0 and max_val > 0:
+            # For formats spanning both positive and negative
+            bin_edges = np.linspace(-max_abs_val, max_abs_val, bins + 1)
         else:
-            values = np.linspace(min_val, max_val, num_points)
+            # For formats with only positive or only negative values
+            bin_edges = np.linspace(min_val, max_val, bins + 1)
         
-        # Assign categories based on value properties
+        # Calculate counts for each bin using analytical method
+        counts = np.zeros(bins)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        for i in range(bins):
+            bin_min = bin_edges[i]
+            bin_max = bin_edges[i + 1]
+            counts[i] = format_obj.count_values_between(bin_min, bin_max)
+        
+        # Assign categories to bin centers
         categories = []
-        for val in values:
-            if val == 0:
+        for center in bin_centers:
+            if center == 0:
                 categories.append('zero')
             elif hasattr(format_obj, 'get_min_normal'):
-                if abs(val) < format_obj.get_min_normal():
+                if abs(center) < format_obj.get_min_normal():
                     categories.append('subnormal')
                 else:
                     categories.append('normal')
             else:
                 categories.append('integer')
         
-        return values, categories
+        return bin_centers, counts, categories
     except Exception as e:
-        st.error(f"Error in analytical value generation: {str(e)}")
-        return np.array([]), []
+        st.error(f"Error in analytical histogram generation: {str(e)}")
+        return np.array([]), np.array([]), []
 
 def create_scatter_plot(format_obj, values: np.ndarray, categories: List[str], 
                        title: str, color_scheme: str = "default", ax: Optional[plt.Axes] = None) -> plt.Figure:
@@ -245,28 +263,36 @@ def create_histogram_plot(format_obj, values: np.ndarray, categories: List[str],
             return fig
         return None
     
-    # Calculate range and create bins centered at zero
-    max_abs_val = max(abs(format_obj.min_value), abs(format_obj.max_value))
-    
-    # Create bins that are symmetric around zero
-    if format_obj.min_value < 0 and format_obj.max_value > 0:
-        # For formats spanning both positive and negative
-        bin_edges = np.linspace(-max_abs_val, max_abs_val, bins + 1)
+    # Use analytical counting for wide formats, regular histogram for narrow formats
+    if format_obj.total_bits > 16:
+        # Use analytical method for wide formats
+        bin_centers, hist, bin_categories = get_analytical_histogram_data(format_obj, bins)
+        bin_width = (bin_centers[1] - bin_centers[0]) if len(bin_centers) > 1 else 1.0
     else:
-        # For formats with only positive or only negative values
-        bin_edges = np.linspace(format_obj.min_value, format_obj.max_value, bins + 1)
-    
-    # Create histogram
-    hist, bin_edges = np.histogram(values, bins=bin_edges, density=False)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        # Use regular histogram for narrow formats
+        max_abs_val = max(abs(format_obj.min_value), abs(format_obj.max_value))
+        
+        # Create bins that are symmetric around zero
+        if format_obj.min_value < 0 and format_obj.max_value > 0:
+            # For formats spanning both positive and negative
+            bin_edges = np.linspace(-max_abs_val, max_abs_val, bins + 1)
+        else:
+            # For formats with only positive or only negative values
+            bin_edges = np.linspace(format_obj.min_value, format_obj.max_value, bins + 1)
+        
+        # Create histogram
+        hist, bin_edges = np.histogram(values, bins=bin_edges, density=False)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_width = bin_edges[1] - bin_edges[0]
+        bin_categories = categories
     
     # Plot histogram bars
-    ax.bar(bin_centers, hist, width=bin_edges[1]-bin_edges[0], 
+    ax.bar(bin_centers, hist, width=bin_width, 
            alpha=0.7, color='skyblue', edgecolor='navy')
     
     # Add category markers
-    for cat in set(categories):
-        cat_values = [v for v, c in zip(values, categories) if c == cat]
+    for cat in set(bin_categories):
+        cat_values = [v for v, c in zip(bin_centers, bin_categories) if c == cat]
         if cat_values:
             ax.scatter(cat_values, [0]*len(cat_values), 
                       c='red' if cat == 'zero' else 'green' if cat == 'subnormal' else 'blue',
@@ -281,7 +307,10 @@ def create_histogram_plot(format_obj, values: np.ndarray, categories: List[str],
     # Add format statistics
     stats_text = f'Min: {format_obj.min_value:.3e}\n'
     stats_text += f'Max: {format_obj.max_value:.3e}\n'
-    stats_text += f'Values: {len(values)}'
+    if format_obj.total_bits > 16:
+        stats_text += f'Total values: {sum(hist)} (analytical)'
+    else:
+        stats_text += f'Values: {len(values)}'
     ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
              verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
     
@@ -304,20 +333,30 @@ def create_density_plot(format_obj, values: np.ndarray, categories: List[str],
             return fig
         return None
     
-    # Calculate range and create bins centered at zero
-    max_abs_val = max(abs(format_obj.min_value), abs(format_obj.max_value))
-    
-    # Create bins that are symmetric around zero
-    if format_obj.min_value < 0 and format_obj.max_value > 0:
-        # For formats spanning both positive and negative
-        bin_edges = np.linspace(-max_abs_val, max_abs_val, bins + 1)
+    # Use analytical counting for wide formats, regular histogram for narrow formats
+    if format_obj.total_bits > 16:
+        # Use analytical method for wide formats
+        bin_centers, counts, bin_categories = get_analytical_histogram_data(format_obj, bins)
+        # Convert counts to density (normalize by total count and bin width)
+        total_count = sum(counts)
+        bin_width = (bin_centers[1] - bin_centers[0]) if len(bin_centers) > 1 else 1.0
+        hist = counts / (total_count * bin_width) if total_count > 0 else counts
     else:
-        # For formats with only positive or only negative values
-        bin_edges = np.linspace(format_obj.min_value, format_obj.max_value, bins + 1)
-    
-    # Calculate density using histogram
-    hist, bin_edges = np.histogram(values, bins=bin_edges, density=True)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        # Use regular histogram for narrow formats
+        max_abs_val = max(abs(format_obj.min_value), abs(format_obj.max_value))
+        
+        # Create bins that are symmetric around zero
+        if format_obj.min_value < 0 and format_obj.max_value > 0:
+            # For formats spanning both positive and negative
+            bin_edges = np.linspace(-max_abs_val, max_abs_val, bins + 1)
+        else:
+            # For formats with only positive or only negative values
+            bin_edges = np.linspace(format_obj.min_value, format_obj.max_value, bins + 1)
+        
+        # Calculate density using histogram
+        hist, bin_edges = np.histogram(values, bins=bin_edges, density=True)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_categories = categories
     
     # Create color-coded density curve
     colors = plt.cm.viridis(np.linspace(0, 1, len(hist)))
@@ -328,8 +367,8 @@ def create_density_plot(format_obj, values: np.ndarray, categories: List[str],
                 color=colors[i], linewidth=3, alpha=0.8)
     
     # Add category markers
-    for cat in set(categories):
-        cat_values = [v for v, c in zip(values, categories) if c == cat]
+    for cat in set(bin_categories):
+        cat_values = [v for v, c in zip(bin_centers, bin_categories) if c == cat]
         if cat_values:
             ax.scatter(cat_values, [0]*len(cat_values), 
                       c='red' if cat == 'zero' else 'green' if cat == 'subnormal' else 'blue',
@@ -344,7 +383,10 @@ def create_density_plot(format_obj, values: np.ndarray, categories: List[str],
     # Add format statistics
     stats_text = f'Min: {format_obj.min_value:.3e}\n'
     stats_text += f'Max: {format_obj.max_value:.3e}\n'
-    stats_text += f'Values: {len(values)}'
+    if format_obj.total_bits > 16:
+        stats_text += f'Total values: {sum(counts)} (analytical)'
+    else:
+        stats_text += f'Values: {len(values)}'
     ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
              verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
     
@@ -377,7 +419,7 @@ def create_shared_plot(format_obj1, values1: np.ndarray, categories1: List[str],
             ax.set_ylim(-0.5, 0.8)
             ax.set_yticks([0, 0.3])
             ax.set_yticklabels([format_obj1.name, format_obj2.name])
-            ax.set_title(f"Format Comparison: {format_obj1.name} vs {format_obj2.name}", fontsize=14, fontweight='bold')
+            ax.set_title(f"Format Comparison: {format_obj1.name} vs {format_obj2.name}", fontsize=14, fontweight='bold', y=1.02)
         else:
             ax.set_title(f"{format_obj1.name} - Scatter Plot", fontsize=14, fontweight='bold')
     
@@ -395,7 +437,7 @@ def create_shared_plot(format_obj1, values1: np.ndarray, categories1: List[str],
                                  f"{format_obj2.name} - Histogram Plot", bins, ax2)
             
             fig.suptitle(f"Format Comparison: {format_obj1.name} vs {format_obj2.name}", 
-                        fontsize=16, fontweight='bold')
+                        fontsize=16, fontweight='bold', y=1.02)
         else:
             # Single format mode
             fig, ax = plt.subplots(figsize=(12, 6))
@@ -418,7 +460,7 @@ def create_shared_plot(format_obj1, values1: np.ndarray, categories1: List[str],
                                f"{format_obj2.name} - Density Plot", bins, ax2)
             
             fig.suptitle(f"Format Comparison: {format_obj1.name} vs {format_obj2.name}", 
-                        fontsize=16, fontweight='bold')
+                        fontsize=16, fontweight='bold', y=1.02)
         else:
             # Single format mode
             fig, ax = plt.subplots(figsize=(12, 6))
@@ -451,7 +493,7 @@ def create_shared_plot(format_obj1, values1: np.ndarray, categories1: List[str],
                                f"{format_obj2.name} - Density Plot", bins, axes[5])
             
             fig.suptitle(f"Format Comparison: {format_obj1.name} vs {format_obj2.name}", 
-                        fontsize=16, fontweight='bold')
+                        fontsize=16, fontweight='bold', y=1.02)
         else:
             # Single format mode - create subplots for all three types
             fig, axes = plt.subplots(3, 1, figsize=(12, 15))
