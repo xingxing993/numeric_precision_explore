@@ -2,7 +2,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 from numeric_format import (
-    INTFormat, FPFormat, FPFNFormat, FPFNUZFormat,
+    INTFormat, FPFormat, FPFNFormat, FPFNUZFormat, HIF8Format,
     NumericValue
 )
 import seaborn as sns
@@ -90,6 +90,11 @@ def create_numeric_formats() -> Dict[str, object]:
         'FP8_E4M3FNUZ': FPFNUZFormat('FP8_E4M3FNUZ', 4, 3),
     })
     
+    # HiFloat8 format (special non-IEEE format)
+    formats.update({
+        'HiFloat8': HIF8Format('HiFloat8'),
+    })
+    
     return formats
 
 def create_custom_format(format_type: str, **kwargs) -> Optional[object]:
@@ -109,6 +114,9 @@ def create_custom_format(format_type: str, **kwargs) -> Optional[object]:
             if mantissa_bits < 1 or mantissa_bits > 52:
                 raise ValueError(f"Mantissa bits must be between 1 and 52, got {mantissa_bits}")
             return FPFormat(f"Custom_FP{exp_bits}M{mantissa_bits}", exp_bits, mantissa_bits)
+        elif format_type == "HiFloat8":
+            # HiFloat8 is a fixed 8-bit format, no customization needed
+            return HIF8Format("Custom_HiFloat8")
         else:
             raise ValueError(f"Unknown format type: {format_type}")
     except Exception as e:
@@ -526,11 +534,24 @@ def get_format_summary(format_obj) -> str:
             summary += f"| **Type** | {'Signed' if format_obj.signed else 'Unsigned'} Integer |\n"
             summary += f"| **Range** | [{format_obj.min_value:,}, {format_obj.max_value:,}] |\n"
             summary += f"| **Total Codes** | {format_obj.total_codes:,} |\n"
-        else:
-            # Floating point format table
+        elif isinstance(format_obj, HIF8Format):
+            # HiFloat8 format table
             summary += "| Property | Value |\n"
             summary += "|----------|-------|\n"
-            summary += "| **Type** | Floating Point |\n"
+            summary += "| **Type** | HiFloat8 (Non-IEEE) |\n"
+            summary += "| **Sign Bit** | 1 |\n"
+            summary += "| **Dot Field** | Variable-length prefix codes |\n"
+            summary += "| **Exponent** | Sign-magnitude with implicit '1' |\n"
+            summary += "| **Mantissa** | Variable width (1-3 bits) |\n"
+            summary += f"| **Range** | [{format_obj.min_value:.3e}, {format_obj.max_value:.3e}] |\n"
+            summary += f"| **Total Codes** | {format_obj.total_codes:,} |\n"
+            summary += "| **Special Values** | Zero (0x00), NaN (0x80), ±Inf (0x6F, 0xEF) |\n"
+            summary += "| **Denormal** | Special encoding (Dot='0000') |\n"
+        else:
+            # Standard floating point format table
+            summary += "| Property | Value |\n"
+            summary += "|----------|-------|\n"
+            summary += "| **Type** | Floating Point (IEEE754) |\n"
             summary += f"| **Exponent Bits** | {format_obj.exponent_bits} |\n"
             summary += f"| **Mantissa Bits** | {format_obj.mantissa_bits} |\n"
             summary += f"| **Bias** | {format_obj.bias} |\n"
@@ -588,7 +609,7 @@ def main():
         st.sidebar.markdown('<div class="custom-format-section">', unsafe_allow_html=True)
         st.sidebar.subheader("Primary Custom Format")
         
-        custom_type1 = st.sidebar.selectbox("Format Type:", ["Integer", "Floating Point"], key="primary_type")
+        custom_type1 = st.sidebar.selectbox("Format Type:", ["Integer", "Floating Point", "HiFloat8"], key="primary_type")
         
         if custom_type1 == "Integer":
             custom_bits1 = st.sidebar.number_input("Bits:", min_value=4, max_value=64, value=8, key="primary_bits")
@@ -598,12 +619,19 @@ def main():
                 primary_custom_format = create_custom_format("Integer", bits=custom_bits1, signed=custom_signed1)
                 if primary_custom_format:
                     st.sidebar.success(f"Created {primary_custom_format.name}")
-        else:
+        elif custom_type1 == "Floating Point":
             custom_exp_bits1 = st.sidebar.number_input("Exponent Bits:", min_value=2, max_value=15, value=4, key="primary_exp")
             custom_mantissa_bits1 = st.sidebar.number_input("Mantissa Bits:", min_value=1, max_value=52, value=3, key="primary_mantissa")
             
             if st.sidebar.button("Create Primary Format", key="create_primary"):
                 primary_custom_format = create_custom_format("Floating Point", exp_bits=custom_exp_bits1, mantissa_bits=custom_mantissa_bits1)
+                if primary_custom_format:
+                    st.sidebar.success(f"Created {primary_custom_format.name}")
+        elif custom_type1 == "HiFloat8":
+            st.sidebar.info("HiFloat8 is a fixed 8-bit format with variable-length prefix codes. No customization needed.")
+            
+            if st.sidebar.button("Create Primary Format", key="create_primary"):
+                primary_custom_format = create_custom_format("HiFloat8")
                 if primary_custom_format:
                     st.sidebar.success(f"Created {primary_custom_format.name}")
         
@@ -626,7 +654,7 @@ def main():
             st.sidebar.markdown('<div class="custom-format-section">', unsafe_allow_html=True)
             st.sidebar.subheader("Secondary Custom Format")
             
-            custom_type2 = st.sidebar.selectbox("Format Type:", ["Integer", "Floating Point"], key="secondary_type")
+            custom_type2 = st.sidebar.selectbox("Format Type:", ["Integer", "Floating Point", "HiFloat8"], key="secondary_type")
             
             if custom_type2 == "Integer":
                 custom_bits2 = st.sidebar.number_input("Bits:", min_value=4, max_value=64, value=8, key="secondary_bits")
@@ -636,12 +664,19 @@ def main():
                     secondary_custom_format = create_custom_format("Integer", bits=custom_bits2, signed=custom_signed2)
                     if secondary_custom_format:
                         st.sidebar.success(f"Created {secondary_custom_format.name}")
-            else:
+            elif custom_type2 == "Floating Point":
                 custom_exp_bits2 = st.sidebar.number_input("Exponent Bits:", min_value=2, max_value=15, value=4, key="secondary_exp")
                 custom_mantissa_bits2 = st.sidebar.number_input("Mantissa Bits:", min_value=1, max_value=52, value=3, key="secondary_mantissa")
                 
                 if st.sidebar.button("Create Secondary Format", key="create_secondary"):
                     secondary_custom_format = create_custom_format("Floating Point", exp_bits=custom_exp_bits2, mantissa_bits=custom_mantissa_bits2)
+                    if secondary_custom_format:
+                        st.sidebar.success(f"Created {secondary_custom_format.name}")
+            elif custom_type2 == "HiFloat8":
+                st.sidebar.info("HiFloat8 is a fixed 8-bit format with variable-length prefix codes. No customization needed.")
+                
+                if st.sidebar.button("Create Secondary Format", key="create_secondary"):
+                    secondary_custom_format = create_custom_format("HiFloat8")
                     if secondary_custom_format:
                         st.sidebar.success(f"Created {secondary_custom_format.name}")
             

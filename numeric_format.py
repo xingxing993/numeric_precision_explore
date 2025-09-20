@@ -639,6 +639,187 @@ class FPFNUZFormat(FPFormat):
 
 
 
+class HIF8Format(NumericFormat):
+    """HIF8 floating-point numeric format.
+    
+    HiFloat8 is a non-standard 8-bit floating-point format with:
+    - 1 sign bit
+    - Variable-length prefix codes for exponent field (Dot field)
+    - Variable mantissa widths based on Dot field value
+    - Special values: Zero (0x00), NaN (0x80), Infinity (±0x6F, ±0xEF)
+    - Denormal numbers with special encoding
+    - Sign-magnitude exponent encoding with implicit leading '1'
+    """
+    
+    def __init__(self, name: str):
+        super().__init__(name, 8)
+        self._calculate_ranges()
+    
+    def _calculate_ranges(self):
+        """Calculate min/max values by examining all possible codes."""
+        min_val = float('inf')
+        max_val = float('-inf')
+        
+        for code in range(256):
+            try:
+                numeric_val = self.get_value_at_code(code)
+                if not math.isnan(numeric_val.value) and not math.isinf(numeric_val.value):
+                    min_val = min(min_val, abs(numeric_val.value))
+                    max_val = max(max_val, abs(numeric_val.value))
+            except:
+                continue
+        
+        self._min_value = -max_val
+        self._max_value = max_val
+    
+    @property
+    def min_value(self) -> float:
+        """Minimum representable finite value."""
+        return self._min_value
+    
+    @property
+    def max_value(self) -> float:
+        """Maximum representable finite value."""
+        return self._max_value
+    
+    def get_value_at_code(self, code: Union[int, str]) -> NumericValue:
+        """Get the HiFloat8 value for a specific code."""
+        # Normalize the input code
+        code_int = self._normalize_code_input(code)
+        
+        if not (0 <= code_int < 256):
+            raise ValueError(f"Code {code} out of range for 8-bit format")
+        
+        # Use the decode_hif8 logic
+        bits = f'{code_int:08b}'
+        sign_bit = bits[0]
+        sign_val = -1.0 if sign_bit == '1' else 1.0
+        
+        # Handle special values
+        if code_int == 0b00000000:
+            return NumericValue(
+                code=code_int,
+                value=0.0,
+                code_binary=bits,
+                category="zero"
+            )
+        
+        if code_int == 0b10000000:
+            return NumericValue(
+                code=code_int,
+                value=float('nan'),
+                code_binary=bits,
+                category="nan"
+            )
+        
+        if code_int == 0b01101111:
+            return NumericValue(
+                code=code_int,
+                value=float('inf'),
+                code_binary=bits,
+                category="infinity"
+            )
+        
+        if code_int == 0b11101111:
+            return NumericValue(
+                code=code_int,
+                value=float('-inf'),
+                code_binary=bits,
+                category="infinity"
+            )
+        
+        # Parse Dot field using prefix codes
+        dot_code = None
+        em_bits = ''
+        m_bits = ''
+        
+        # Case D=4 (Dot='11')
+        if bits[1:3] == '11':
+            dot_code, D, m_width = '11', 4, 1
+            em_bits, m_bits = bits[3:7], bits[7:]
+        # Case D=3 (Dot='10')
+        elif bits[1:3] == '10':
+            dot_code, D, m_width = '10', 3, 2
+            em_bits, m_bits = bits[3:6], bits[6:]
+        # Case D=2 (Dot='01')
+        elif bits[1:3] == '01':
+            dot_code, D, m_width = '01', 2, 3
+            em_bits, m_bits = bits[3:5], bits[5:]
+        # Case D=1 (Dot='001')
+        elif bits[1:4] == '001':
+            dot_code, D, m_width = '001', 1, 3
+            em_bits, m_bits = bits[4:5], bits[5:]
+        # Case D=0 (Dot='0001')
+        elif bits[1:5] == '0001':
+            dot_code, D, m_width = '0001', 0, 3
+            m_bits = bits[5:]
+        # Case Denormal (Dot='0000')
+        elif bits[1:5] == '0000':
+            m_bits = bits[5:]
+            m_val = int(m_bits, 2)
+            # Denormal formula: X = (-1)^S * 2^(M-23) * 1.0
+            exponent = m_val - 23
+            value = sign_val * (2.0**exponent)
+            return NumericValue(
+                code=code_int,
+                value=value,
+                code_binary=bits,
+                category="denormal"
+            )
+        else:
+            # Invalid encoding
+            return NumericValue(
+                code=code_int,
+                value=float('nan'),
+                code_binary=bits,
+                category="invalid"
+            )
+        
+        # Calculate normal value
+        # Decode exponent from sign-magnitude Em with implicit leading '1'
+        exponent_val = 0
+        if D > 0:
+            exp_sign_bit = em_bits[0]
+            mag_suffix = em_bits[1:]
+            mag_bin = '1' + mag_suffix
+            mag_val = int(mag_bin, 2)
+            exponent_val = mag_val if exp_sign_bit == '0' else -mag_val
+        
+        # Decode mantissa M
+        m_val = int(m_bits, 2)
+        significand = 1.0 + m_val / (2**m_width)
+        
+        value = sign_val * (2.0**exponent_val) * significand
+        
+        return NumericValue(
+            code=code_int,
+            value=value,
+            code_binary=bits,
+            category="normal"
+        )
+    
+    def enumerate_values(self) -> Iterator[NumericValue]:
+        """Enumerate all possible HiFloat8 values."""
+        for code in range(256):
+            yield self.get_value_at_code(code)
+    
+    def count_values_between(self, min_val: float, max_val: float) -> int:
+        """Count values within a specific range [min_val, max_val], inclusive."""
+        if min_val > max_val:
+            raise ValueError("min_val must be less than or equal to max_val")
+        
+        count = 0
+        for code in range(256):
+            try:
+                numeric_val = self.get_value_at_code(code)
+                if (not math.isnan(numeric_val.value) and 
+                    min_val <= numeric_val.value <= max_val):
+                    count += 1
+            except:
+                continue
+        
+        return count
+
 
 
 
@@ -651,52 +832,27 @@ if __name__ == "__main__":
         'FP4_E2M1': FPFormat('FP4_E2M1', 2, 1),  # E2M1 format
         'FP8_E4M3': FPFormat('FP8_E4M3', 4, 3),  # Standard E4M3
         'FP8_E5M2': FPFormat('FP8_E5M2', 5, 2),  # E5M2 format
-        # 'FP16': FPFormat('FP16', 5, 10),         # Half precision
-        # 'BF16': FPFormat('BF16', 8, 7),          # BFloat16
-        # 'FP32': FPFormat('FP32', 8, 23),         # Single precision
-        # 'FP64': FPFormat('FP64', 11, 52),        # Double precision
+        'FP16': FPFormat('FP16', 5, 10),         # Half precision
+        'BF16': FPFormat('BF16', 8, 7),          # BFloat16
+        'FP32': FPFormat('FP32', 8, 23),         # Single precision
+        'FP64': FPFormat('FP64', 11, 52),        # Double precision
         'FP8_E4M3FN': FPFNFormat('FP8_E4M3FN', 4, 3),             # FP8_E4M3FN
         'FP8_E4M3FNUZ': FPFNUZFormat('FP8_E4M3FNUZ', 4, 3),         # FP8_E4M3FNUZ
     }
     
+
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    fp16 = fp_formats['FP16']
+    vals = fp16.enumerate_values()
+    # output values to csv
+    import pandas as pd
+    df = pd.DataFrame([{
+        'values': val.value,
+        'categories': val.category,
+        'code_binary': val.code_binary,
+        'code': val.code
+    } for val in vals])
+    df.to_csv('fp16_values.csv', index=False)
     
-    
-    # Test FP8_E4M3
-    fp8_e4m3 = fp_formats['FP8_E4M3']
-    print("="*60)
-    print(f"\n{fp8_e4m3}")
-    print(f"Min: {fp8_e4m3.min_value}, Max: {fp8_e4m3.max_value}")
-    print(f"Min normal: {fp8_e4m3.get_min_normal()}, Max normal: {fp8_e4m3.get_max_normal()}")
-    print(f"Min subnormal: {fp8_e4m3.get_min_subnormal()}, Max subnormal: {fp8_e4m3.get_max_subnormal()}")
-    # for val in fp8_e4m3.enumerate_values():
-    #     print(f"Code {val.code}: {val.value} ({val.category})")
-    print(f"Count values between 0.0 and 1.0: {fp8_e4m3.count_values_between(0.01, 0.05)}")
-    print(f"Count values between -1.0 and 1.0: {fp8_e4m3.count_values_between(-1.0, 0.02)}")
-    print(f"Count values between -1.0 and -0.0: {fp8_e4m3.count_values_between(-1.0, -0.0)}")
-
-    # Test FP8_E4M3FN
-    fp8_e4m3fn = fp_formats['FP8_E4M3FN']
-    print("="*60)
-    print(f"\n{fp8_e4m3fn}")
-    print(f"Min: {fp8_e4m3fn.min_value}, Max: {fp8_e4m3fn.max_value}")
-    print(f"Min normal: {fp8_e4m3fn.get_min_normal()}, Max normal: {fp8_e4m3fn.get_max_normal()}")
-    print(f"Min subnormal: {fp8_e4m3fn.get_min_subnormal()}, Max subnormal: {fp8_e4m3fn.get_max_subnormal()}")
-    # for val in fp8_e4m3fn.enumerate_values():
-    #     print(f"Code {val.code}: {val.value} ({val.category})")
-    print(f"Count values between 0.0 and 1.0: {fp8_e4m3fn.count_values_between(0.01, 0.05)}")
-    print(f"Count values between -1.0 and 1.0: {fp8_e4m3fn.count_values_between(-1.0, 0.02)}")
-    print(f"Count values between -1.0 and -0.0: {fp8_e4m3fn.count_values_between(-1.0, -0.0)}")
-
-
-    # Test FP8_E4M3FNUZ
-    fp8_e4m3fnuz = fp_formats['FP8_E4M3FNUZ']
-    print("="*60)
-    print(f"\n{fp8_e4m3fnuz}")
-    print(f"Min: {fp8_e4m3fnuz.min_value}, Max: {fp8_e4m3fnuz.max_value}")
-    print(f"Min normal: {fp8_e4m3fnuz.get_min_normal()}, Max normal: {fp8_e4m3fnuz.get_max_normal()}")
-    print(f"Min subnormal: {fp8_e4m3fnuz.get_min_subnormal()}, Max subnormal: {fp8_e4m3fnuz.get_max_subnormal()}")
-    # for val in fp8_e4m3fnuz.enumerate_values():
-    #     print(f"Code {val.code}: {val.value} ({val.category})")
-    print(f"Count values between 0.0 and 1.0: {fp8_e4m3fnuz.count_values_between(0.01, 0.05)}")
-    print(f"Count values between -1.0 and 1.0: {fp8_e4m3fnuz.count_values_between(-1.0, 0.02)}")
-    print(f"Count values between -1.0 and -0.0: {fp8_e4m3fnuz.count_values_between(-1.0, -0.0)}")
